@@ -34,11 +34,10 @@ export default function VaultPage() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
 
-  // The file list is collapsed by default: the page only ever shows a
-  // count fetched from Postgres. Names and download buttons only appear
-  // after an explicit tap, and only after decrypting the envelopes in
-  // this browser with the in-memory Master Key — nothing extra is ever
-  // sent to, or held by, the server to make that possible.
+  // Needed again at export time to rebuild the offline package — this is
+  // a non-secret salt, safe to hold in memory alongside the Master Key.
+  const [masterSaltHex, setMasterSaltHex] = useState('');
+
   const [rawFiles, setRawFiles] = useState<any[]>([]);
   const [decryptedFiles, setDecryptedFiles] = useState<VaultFile[]>([]);
   const [revealed, setRevealed] = useState(false);
@@ -48,10 +47,11 @@ export default function VaultPage() {
     setBusy(true);
     setError(null);
     try {
-      const { masterSaltHex } = await srpLogin(passphrase);
-      const masterKey = await deriveMasterKeyPBKDF2(passphrase, masterSaltHex);
+      const { masterSaltHex: saltHex } = await srpLogin(passphrase);
+      const masterKey = await deriveMasterKeyPBKDF2(passphrase, saltHex);
       keyStore.set(masterKey);
       keyStore.onWipe(() => setUnlocked(false));
+      setMasterSaltHex(saltHex);
       setPassphrase(''); // drop the plaintext passphrase from component state immediately
       setUnlocked(true);
       await refreshList();
@@ -161,6 +161,8 @@ export default function VaultPage() {
     }
   }
 
+  // Normal path: fetch ciphertext + envelope, decrypt right here, save the
+  // real file. Fine for everyday use on a device you trust.
   async function handleDownload(fileId: string) {
     const masterKey = keyStore.get();
     if (!masterKey) return;
@@ -183,6 +185,40 @@ export default function VaultPage() {
     const a = document.createElement('a');
     a.href = url;
     a.download = `${meta.filename}${meta.extension}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Offline path: package the still-encrypted blob + the still-sealed
+  // envelope + the (non-secret) master salt into one .json file. NOTHING
+  // in this file is decrypted or independently readable — it's exactly as
+  // protected as what's already sitting in Supabase. Carry it to a
+  // separate, trusted device and open public/offline-decrypt.html there;
+  // that's the only place the real file, and your passphrase, should ever
+  // exist together.
+  async function handleExportOffline(fileId: string) {
+    const res = await fetch('/api/storage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'presign-download', fileId }),
+    });
+    const { downloadUrl, envelopeCiphertextB64, envelopeIvB64, fileIvB64 } = await res.json();
+    const ciphertext = await (await fetch(downloadUrl)).arrayBuffer();
+
+    const exportPackage = {
+      format: 'zk-vault-offline-export-v1',
+      fileIvB64,
+      envelopeCiphertextB64,
+      envelopeIvB64,
+      masterSaltHex,
+      ciphertextB64: bufToB64(ciphertext),
+    };
+
+    const blob = new Blob([JSON.stringify(exportPackage)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `vault-export-${Date.now()}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -251,13 +287,23 @@ export default function VaultPage() {
                   <div className="file-name">{f.name}</div>
                   <div className="file-meta">{f.size.toLocaleString()} bytes</div>
                 </div>
-                <button className="btn-ghost" onClick={() => handleDownload(f.id)}>
-                  Download
-                </button>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button className="btn-ghost" onClick={() => handleDownload(f.id)}>
+                    Download
+                  </button>
+                  <button className="btn-ghost" onClick={() => handleExportOffline(f.id)}>
+                    Export
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
         )}
+
+        <p className="hint-text">
+          "Export" saves an encrypted package, not the real file — open it with{' '}
+          <code>offline-decrypt.html</code> on a separate trusted device.
+        </p>
       </div>
     </main>
   );
