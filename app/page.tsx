@@ -1,107 +1,209 @@
-// app/change-passphrase/page.tsx
+// app/page.tsx
 'use client';
 
 import { useState } from 'react';
-import { createSRPClient } from '@swan-io/srp';
-import { deriveMasterKeyPBKDF2, openEnvelope, sealEnvelope, randomBytes, toHex } from '@/lib/crypto';
-import { srpLogin } from '@/lib/srp-client';
+import {
+  keyStore,
+  deriveMasterKeyPBKDF2,
+  sha256Hex,
+  encryptFile,
+  sealEnvelope,
+  openEnvelope,
+  toHex,
+  bufToB64,
+} from '@/lib/crypto';
+import { srpLogin, logout } from '@/lib/srp-client';
+import { supabasePublic } from '@/lib/supabase-browser';
 
-const srp = createSRPClient('SHA-256', 2048);
+const BUCKET = 'vault-files';
 
-export default function ChangePassphrasePage() {
-  const [oldPassphrase, setOldPassphrase] = useState('');
-  const [newPassphrase, setNewPassphrase] = useState('');
-  const [confirm, setConfirm] = useState('');
-  const [status, setStatus] = useState('');
+interface VaultFile {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  createdAt: string;
+}
+
+export default function VaultPage() {
+  const [unlocked, setUnlocked] = useState(false);
+  const [passphrase, setPassphrase] = useState('');
+  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState(false);
+  const [status, setStatus] = useState('');
+  const [masterSaltHex, setMasterSaltHex] = useState('');
+  const [rawFiles, setRawFiles] = useState<any[]>([]);
+  const [decryptedFiles, setDecryptedFiles] = useState<VaultFile[]>([]);
+  const [revealed, setRevealed] = useState(false);
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function handleUnlock(e: React.FormEvent) {
     e.preventDefault();
-    if (newPassphrase.length < 12) {
-      setStatus('New passphrase should be 12+ characters.');
-      return;
-    }
-    if (newPassphrase !== confirm) {
-      setStatus('New passphrases do not match.');
-      return;
-    }
-    if (newPassphrase === oldPassphrase) {
-      setStatus('New passphrase must be different from the current one.');
-      return;
-    }
-
     setBusy(true);
+    setError(null);
     try {
-      setStatus('Verifying current passphrase…');
-      const { masterSaltHex: oldSaltHex } = await srpLogin(oldPassphrase);
-      const oldMasterKey = await deriveMasterKeyPBKDF2(oldPassphrase, oldSaltHex);
-
-      setStatus('Fetching your file list…');
-      const listRes = await fetch('/api/storage');
-      if (!listRes.ok) throw new Error('Could not fetch file list');
-      const { files } = await listRes.json();
-
-      setStatus(`Re-wrapping ${files.length} file key${files.length === 1 ? '' : 's'} locally…`);
-      const newSaltHex = toHex(randomBytes(16));
-      const newMasterSaltHex = toHex(randomBytes(16));
-      const newMasterKey = await deriveMasterKeyPBKDF2(newPassphrase, newMasterSaltHex);
-
-      // Only the small envelope (file key + filename/size/type) gets
-      // decrypted and re-sealed here — the actual file ciphertext in
-      // storage is never touched, never re-uploaded.
-      const fileUpdates = await Promise.all(
-        files.map(async (row: any) => {
-          const meta = await openEnvelope(oldMasterKey, { ciphertextB64: row.envelope_ciphertext, ivB64: row.envelope_iv });
-          const newEnvelope = await sealEnvelope(newMasterKey, meta);
-          return { id: row.id, envelopeCiphertextB64: newEnvelope.ciphertextB64, envelopeIvB64: newEnvelope.ivB64 };
-        })
-      );
-
-      setStatus('Computing new account credentials…');
-      const newPrivateKey = await srp.deriveSafePrivateKey(newSaltHex, newPassphrase);
-      const newVerifierHex = await srp.deriveVerifier(newPrivateKey);
-
-      setStatus('Saving…');
-      const res = await fetch('/api/change-passphrase', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          newSrpSaltHex: newSaltHex,
-          newSrpVerifierHex: newVerifierHex,
-          newMasterSaltHex,
-          fileUpdates,
-        }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? 'Save failed — nothing was changed, your old passphrase still works.');
-      }
-
-      setOldPassphrase('');
-      setNewPassphrase('');
-      setConfirm('');
-      setDone(true);
+      const { masterSaltHex: saltHex } = await srpLogin(passphrase);
+      const masterKey = await deriveMasterKeyPBKDF2(passphrase, saltHex);
+      keyStore.set(masterKey);
+      keyStore.onWipe(() => setUnlocked(false));
+      setMasterSaltHex(saltHex);
+      setPassphrase('');
+      setUnlocked(true);
+      await refreshList();
     } catch (err: any) {
-      setStatus(err.message ?? 'Failed — your old passphrase should still work.');
+      setError(err.message ?? 'Login failed');
     } finally {
       setBusy(false);
     }
   }
 
-  if (done) {
+  async function handleLockNow() {
+    await logout();
+    keyStore.wipe();
+    setRevealed(false);
+    setDecryptedFiles([]);
+  }
+
+  async function refreshList() {
+    const res = await fetch('/api/storage');
+    if (!res.ok) return;
+    const { files: rows } = await res.json();
+    setRawFiles(rows);
+    if (revealed) await decryptAll(rows);
+  }
+
+  async function decryptAll(rows: any[]) {
+    const masterKey = keyStore.get();
+    if (!masterKey) return;
+    const decrypted = await Promise.all(
+      rows.map(async (row: any) => {
+        const meta = await openEnvelope(masterKey, { ciphertextB64: row.envelope_ciphertext, ivB64: row.envelope_iv });
+        return { id: row.id, name: `${meta.filename}${meta.extension}`, size: meta.size, mimeType: meta.mimeType, createdAt: row.created_at };
+      })
+    );
+    setDecryptedFiles(decrypted);
+  }
+
+  async function handleReveal() {
+    await decryptAll(rawFiles);
+    setRevealed(true);
+  }
+
+  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    const masterKey = keyStore.get();
+    if (!file || !masterKey) return;
+
+    try {
+      setStatus('Checking for known malware…');
+      const hash = await sha256Hex(file);
+      const scanRes = await fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sha256: hash }),
+      });
+      const scan = await scanRes.json();
+      if (scan.verdict === 'malicious') {
+        setStatus(`Blocked — ${scan.engineHits}/${scan.engineTotal} engines flagged this file.`);
+        e.target.value = '';
+        return;
+      }
+
+      setStatus('Encrypting…');
+      const { ciphertext, iv, fileKeyRaw } = await encryptFile(file);
+      const parts = file.name.split('.');
+      const extension = parts.length > 1 ? '.' + parts.pop() : '';
+      const filename = parts.join('.');
+      const envelope = await sealEnvelope(masterKey, {
+        fileKeyHex: toHex(fileKeyRaw),
+        filename,
+        extension,
+        size: file.size,
+        mimeType: file.type,
+      });
+
+      setStatus('Requesting upload slot…');
+      const presign = await fetch('/api/storage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'presign-upload',
+          envelopeCiphertextB64: envelope.ciphertextB64,
+          envelopeIvB64: envelope.ivB64,
+          fileIvB64: bufToB64(iv),
+          ciphertextSize: ciphertext.byteLength,
+          scanStatus: scan.verdict === 'clean' ? 'clean' : 'unscanned',
+        }),
+      });
+      const { objectKey, path, token } = await presign.json();
+
+      setStatus('Uploading…');
+      const ciphertextBlob = new Blob([ciphertext]);
+      const { error: uploadError } = await supabasePublic.storage.from(BUCKET).uploadToSignedUrl(path, token, ciphertextBlob);
+      if (uploadError) throw new Error(uploadError.message);
+
+      await fetch('/api/storage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'confirm', objectKey }),
+      });
+
+      setStatus('Done.');
+      e.target.value = '';
+      await refreshList();
+    } catch (err: any) {
+      setStatus(`Upload failed: ${err.message}`);
+    }
+  }
+
+  async function handleExportOffline(fileId: string) {
+    const res = await fetch('/api/storage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'presign-download', fileId }),
+    });
+    const { downloadUrl, envelopeCiphertextB64, envelopeIvB64, fileIvB64 } = await res.json();
+    const ciphertext = await (await fetch(downloadUrl)).arrayBuffer();
+
+    const exportPackage = {
+      format: 'zk-vault-offline-export-v1',
+      fileIvB64,
+      envelopeCiphertextB64,
+      envelopeIvB64,
+      masterSaltHex,
+      ciphertextB64: bufToB64(ciphertext),
+    };
+
+    const blob = new Blob([JSON.stringify(exportPackage)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `vault-export-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  if (!unlocked) {
     return (
       <main className="vault-shell">
         <div className="vault-plate">
           <p className="vault-eyebrow">Personal vault</p>
-          <h1 className="vault-heading">Passphrase changed</h1>
-          <p className="vault-copy">Every file's key is re-wrapped under the new passphrase. Unlock with it from now on.</p>
+          <h1 className="vault-heading">Vault</h1>
+          <form onSubmit={handleUnlock}>
+            <input
+              className="field"
+              type="password"
+              placeholder="Master passphrase"
+              value={passphrase}
+              onChange={e => setPassphrase(e.target.value)}
+              autoFocus
+            />
+            <button className="btn" disabled={busy}>
+              {busy ? 'Unlocking…' : 'Unlock'}
+            </button>
+          </form>
+          {error && <p className="error-text">{error}</p>}
           <p className="hint-text">
-            Any offline-decrypt export files you made before today still need the OLD passphrase to open — re-export
-            after this if you want fresh copies.
-          </p>
-          <p className="hint-text">
-            <a href="/">Go to vault →</a>
+            First time? <a href="/setup">Create your account →</a>
           </p>
         </div>
       </main>
@@ -111,39 +213,54 @@ export default function ChangePassphrasePage() {
   return (
     <main className="vault-shell">
       <div className="vault-plate">
-        <p className="vault-eyebrow">Personal vault</p>
-        <h1 className="vault-heading">Change passphrase</h1>
-        <p className="vault-copy">
-          Re-encrypts every file's key, locally, in this browser. Your files themselves are never touched or
-          re-uploaded — only the small wrapped key for each one.
-        </p>
-        <form onSubmit={handleSubmit}>
-          <input
-            className="field"
-            type="password"
-            placeholder="Current passphrase"
-            value={oldPassphrase}
-            onChange={e => setOldPassphrase(e.target.value)}
-          />
-          <input
-            className="field"
-            type="password"
-            placeholder="New passphrase"
-            value={newPassphrase}
-            onChange={e => setNewPassphrase(e.target.value)}
-          />
-          <input
-            className="field"
-            type="password"
-            placeholder="Confirm new passphrase"
-            value={confirm}
-            onChange={e => setConfirm(e.target.value)}
-          />
-          <button className="btn" disabled={busy}>
-            {busy ? 'Working…' : 'Change passphrase'}
+        <div className="vault-header">
+          <h1 className="vault-heading" style={{ marginBottom: 0 }}>
+            Vault
+          </h1>
+          <button className="btn-ghost" onClick={handleLockNow}>
+            Lock
           </button>
-        </form>
-        {status && <p className="error-text">{status}</p>}
+        </div>
+
+        <input type="file" onChange={handleUpload} />
+        <div className="ledger">
+          {status && <span className="ledger-dot" />}
+          {status}
+        </div>
+
+        <div className="count-row">
+          <div>
+            <div className="count-number">{rawFiles.length}</div>
+            <div className="count-label">file{rawFiles.length === 1 ? '' : 's'} stored, encrypted</div>
+          </div>
+          <button className="btn-ghost" onClick={revealed ? () => setRevealed(false) : handleReveal} disabled={rawFiles.length === 0}>
+            {revealed ? 'Hide' : 'Show files'}
+          </button>
+        </div>
+
+        {revealed && (
+          <ul className="file-list">
+            {decryptedFiles.map(f => (
+              <li key={f.id} className="file-row">
+                <div>
+                  <div className="file-name">{f.name}</div>
+                  <div className="file-meta">{f.size.toLocaleString()} bytes</div>
+                </div>
+                <button className="btn-ghost" onClick={() => handleExportOffline(f.id)}>
+                  Export
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <p className="hint-text">
+          This app never decrypts a file. "Export" saves an encrypted package — open it with{' '}
+          <code>offline-decrypt.html</code> on a separate trusted device to get the real file.
+        </p>
+        <p className="hint-text">
+          <a href="/change-passphrase">Change passphrase →</a>
+        </p>
       </div>
     </main>
   );
