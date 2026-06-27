@@ -3,24 +3,30 @@
 // native Web Crypto API. The passphrase, the Master Key, and File Keys
 // never leave this module as plaintext — nothing here ever touches the
 // network.
+//
+// NOTE: every Uint8Array here is explicitly typed Uint8Array<ArrayBuffer>.
+// Newer TypeScript made Uint8Array generic over its backing buffer
+// (ArrayBuffer | SharedArrayBuffer); crypto.subtle's BufferSource type
+// only accepts the ArrayBuffer-backed form, so a bare "Uint8Array" return
+// type now fails to compile even though it's always correct at runtime.
 
 // ---------- helpers ----------
 
-export function randomBytes(length: number): Uint8Array {
-  return crypto.getRandomValues(new Uint8Array(length));
+export function randomBytes(length: number): Uint8Array<ArrayBuffer> {
+  return crypto.getRandomValues(new Uint8Array(length)) as Uint8Array<ArrayBuffer>;
 }
 
-export function toHex(bytes: Uint8Array): string {
+export function toHex(bytes: Uint8Array<ArrayBuffer>): string {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-export function fromHex(hex: string): Uint8Array {
-  const out = new Uint8Array(hex.length / 2);
+export function fromHex(hex: string): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(hex.length / 2) as Uint8Array<ArrayBuffer>;
   for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
   return out;
 }
 
-export function bufToB64(buf: ArrayBuffer | Uint8Array): string {
+export function bufToB64(buf: ArrayBuffer | Uint8Array<ArrayBuffer>): string {
   const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
   let bin = '';
   bytes.forEach(b => (bin += String.fromCharCode(b)));
@@ -79,8 +85,8 @@ export async function deriveMasterKeyArgon2id(passphrase: string, masterSaltHex:
 
 export interface EncryptedFile {
   ciphertext: ArrayBuffer;
-  iv: Uint8Array;
-  fileKeyRaw: Uint8Array;
+  iv: Uint8Array<ArrayBuffer>;
+  fileKeyRaw: Uint8Array<ArrayBuffer>;
 }
 
 export async function encryptFile(file: File): Promise<EncryptedFile> {
@@ -91,7 +97,11 @@ export async function encryptFile(file: File): Promise<EncryptedFile> {
   return { ciphertext, iv, fileKeyRaw };
 }
 
-export async function decryptFile(ciphertext: ArrayBuffer, iv: Uint8Array, fileKeyRaw: Uint8Array): Promise<ArrayBuffer> {
+export async function decryptFile(
+  ciphertext: ArrayBuffer,
+  iv: Uint8Array<ArrayBuffer>,
+  fileKeyRaw: Uint8Array<ArrayBuffer>
+): Promise<ArrayBuffer> {
   const key = await crypto.subtle.importKey('raw', fileKeyRaw, 'AES-GCM', false, ['decrypt']);
   return crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
 }
@@ -119,11 +129,8 @@ export async function sealEnvelope(masterKey: CryptoKey, metadata: FileMetadata)
 }
 
 export async function openEnvelope(masterKey: CryptoKey, envelope: SealedEnvelope): Promise<FileMetadata> {
-  const plaintext = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: new Uint8Array(b64ToBuf(envelope.ivB64)) },
-    masterKey,
-    b64ToBuf(envelope.ciphertextB64)
-  );
+  const iv = new Uint8Array(b64ToBuf(envelope.ivB64)) as Uint8Array<ArrayBuffer>;
+  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, masterKey, b64ToBuf(envelope.ciphertextB64));
   return JSON.parse(new TextDecoder().decode(plaintext));
 }
 
@@ -131,7 +138,7 @@ export async function openEnvelope(masterKey: CryptoKey, envelope: SealedEnvelop
 
 export async function sha256Hex(file: File): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
-  return toHex(new Uint8Array(digest));
+  return toHex(new Uint8Array(digest) as Uint8Array<ArrayBuffer>);
 }
 
 // ---------- in-memory key store: idle timeout + wipe-on-close ----------
