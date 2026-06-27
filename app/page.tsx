@@ -157,7 +157,7 @@ export default function VaultPage() {
     const meta = await openEnvelope(masterKey, { ciphertextB64: envelopeCiphertextB64, ivB64: envelopeIvB64 });
 
     const ciphertext = await (await fetch(downloadUrl)).arrayBuffer();
-    const iv = new Uint8Array(atob(fileIvB64).split('').map(c => c.charCodeAt(0)));
+    const iv = new Uint8Array(atob(fileIvB64).split('').map(c => c.charCodeAt(0))) as Uint8Array<ArrayBuffer>;
     const fileKeyRaw = fromHex(meta.fileKeyHex);
     const plaintext = await decryptFile(ciphertext, iv, fileKeyRaw);
 
