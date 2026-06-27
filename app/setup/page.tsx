@@ -54,43 +54,57 @@ export default function SetupPage() {
 
   if (done) {
     return (
-      <main style={{ maxWidth: 340, margin: '4rem auto', padding: '0 1rem' }}>
-        <h1>Done</h1>
-        <p>Your vault account is created. Go to the home page and unlock it with your passphrase.</p>
-        <p>This page will refuse to run again. Delete <code>app/setup</code> and <code>app/api/setup</code> whenever you like — it's no longer needed.</p>
-        <p><a href="/">Go to vault →</a></p>
+      <main className="vault-shell">
+        <div className="vault-plate">
+          <p className="vault-eyebrow">Personal vault</p>
+          <h1 className="vault-heading">Account created</h1>
+          <p className="vault-copy">Go to the home page and unlock it with your passphrase.</p>
+          <p className="hint-text">
+            This page will refuse to run again. Delete <code>app/setup</code> and{' '}
+            <code>app/api/setup</code> whenever you like — it's no longer needed.
+          </p>
+          <p className="hint-text">
+            <a href="/">Go to vault →</a>
+          </p>
+        </div>
       </main>
     );
   }
 
   return (
-    <main style={{ maxWidth: 340, margin: '4rem auto', padding: '0 1rem' }}>
-      <h1>One-time setup</h1>
-      <p>This only works if no account exists yet. Your passphrase is never sent anywhere — only a cryptographic proof derived from it is.</p>
-      <form onSubmit={handleSubmit}>
-        <input
-          placeholder="Username (any identifier)"
-          value={username}
-          onChange={e => setUsername(e.target.value)}
-          style={{ width: '100%', padding: 8, marginBottom: 8, boxSizing: 'border-box' }}
-        />
-        <input
-          type="password"
-          placeholder="Master passphrase"
-          value={passphrase}
-          onChange={e => setPassphrase(e.target.value)}
-          style={{ width: '100%', padding: 8, marginBottom: 8, boxSizing: 'border-box' }}
-        />
-        <input
-          type="password"
-          placeholder="Confirm passphrase"
-          value={confirm}
-          onChange={e => setConfirm(e.target.value)}
-          style={{ width: '100%', padding: 8, marginBottom: 8, boxSizing: 'border-box' }}
-        />
-        <button style={{ width: '100%', padding: 8 }}>Create vault account</button>
-      </form>
-      {status && <p>{status}</p>}
+    <main className="vault-shell">
+      <div className="vault-plate">
+        <p className="vault-eyebrow">Personal vault</p>
+        <h1 className="vault-heading">One-time setup</h1>
+        <p className="vault-copy">
+          This only works if no account exists yet. Your passphrase is never sent anywhere — only a
+          cryptographic proof derived from it is.
+        </p>
+        <form onSubmit={handleSubmit}>
+          <input
+            className="field"
+            placeholder="Username (any identifier)"
+            value={username}
+            onChange={e => setUsername(e.target.value)}
+          />
+          <input
+            className="field"
+            type="password"
+            placeholder="Master passphrase"
+            value={passphrase}
+            onChange={e => setPassphrase(e.target.value)}
+          />
+          <input
+            className="field"
+            type="password"
+            placeholder="Confirm passphrase"
+            value={confirm}
+            onChange={e => setConfirm(e.target.value)}
+          />
+          <button className="btn">Create vault account</button>
+        </form>
+        {status && <p className="error-text">{status}</p>}
+      </div>
     </main>
   );
 }
