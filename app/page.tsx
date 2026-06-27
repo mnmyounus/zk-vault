@@ -1,7 +1,7 @@
 // app/page.tsx
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   keyStore,
   deriveMasterKeyPBKDF2,
@@ -33,11 +33,15 @@ export default function VaultPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
-  const [files, setFiles] = useState<VaultFile[]>([]);
 
-  useEffect(() => {
-    keyStore.onWipe(() => setUnlocked(false));
-  }, []);
+  // The file list is collapsed by default: the page only ever shows a
+  // count fetched from Postgres. Names and download buttons only appear
+  // after an explicit tap, and only after decrypting the envelopes in
+  // this browser with the in-memory Master Key — nothing extra is ever
+  // sent to, or held by, the server to make that possible.
+  const [rawFiles, setRawFiles] = useState<any[]>([]);
+  const [decryptedFiles, setDecryptedFiles] = useState<VaultFile[]>([]);
+  const [revealed, setRevealed] = useState(false);
 
   async function handleUnlock(e: React.FormEvent) {
     e.preventDefault();
@@ -47,6 +51,7 @@ export default function VaultPage() {
       const { masterSaltHex } = await srpLogin(passphrase);
       const masterKey = await deriveMasterKeyPBKDF2(passphrase, masterSaltHex);
       keyStore.set(masterKey);
+      keyStore.onWipe(() => setUnlocked(false));
       setPassphrase(''); // drop the plaintext passphrase from component state immediately
       setUnlocked(true);
       await refreshList();
@@ -60,21 +65,33 @@ export default function VaultPage() {
   async function handleLockNow() {
     await logout();
     keyStore.wipe();
+    setRevealed(false);
+    setDecryptedFiles([]);
   }
 
   async function refreshList() {
-    const masterKey = keyStore.get();
-    if (!masterKey) return;
     const res = await fetch('/api/storage');
     if (!res.ok) return;
     const { files: rows } = await res.json();
+    setRawFiles(rows);
+    if (revealed) await decryptAll(rows);
+  }
+
+  async function decryptAll(rows: any[]) {
+    const masterKey = keyStore.get();
+    if (!masterKey) return;
     const decrypted = await Promise.all(
       rows.map(async (row: any) => {
         const meta = await openEnvelope(masterKey, { ciphertextB64: row.envelope_ciphertext, ivB64: row.envelope_iv });
         return { id: row.id, name: `${meta.filename}${meta.extension}`, size: meta.size, mimeType: meta.mimeType, createdAt: row.created_at };
       })
     );
-    setFiles(decrypted);
+    setDecryptedFiles(decrypted);
+  }
+
+  async function handleReveal() {
+    await decryptAll(rawFiles);
+    setRevealed(true);
   }
 
   async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
@@ -92,7 +109,7 @@ export default function VaultPage() {
       });
       const scan = await scanRes.json();
       if (scan.verdict === 'malicious') {
-        setStatus(`Blocked: ${scan.engineHits}/${scan.engineTotal} engines flagged this file. Upload aborted.`);
+        setStatus(`Blocked — ${scan.engineHits}/${scan.engineTotal} engines flagged this file.`);
         e.target.value = '';
         return;
       }
@@ -172,43 +189,76 @@ export default function VaultPage() {
 
   if (!unlocked) {
     return (
-      <main style={{ maxWidth: 340, margin: '4rem auto', padding: '0 1rem' }}>
-        <h1>Vault</h1>
-        <form onSubmit={handleUnlock}>
-          <input
-            type="password"
-            placeholder="Master passphrase"
-            value={passphrase}
-            onChange={e => setPassphrase(e.target.value)}
-            autoFocus
-            style={{ width: '100%', padding: 8, boxSizing: 'border-box' }}
-          />
-          <button disabled={busy} style={{ width: '100%', marginTop: 8, padding: 8 }}>
-            {busy ? 'Unlocking…' : 'Unlock'}
-          </button>
-        </form>
-        {error && <p style={{ color: 'crimson' }}>{error}</p>}
-        <p style={{ fontSize: 13 }}><a href="/setup">First time? Create your account →</a></p>
+      <main className="vault-shell">
+        <div className="vault-plate">
+          <p className="vault-eyebrow">Personal vault</p>
+          <h1 className="vault-heading">Vault</h1>
+          <form onSubmit={handleUnlock}>
+            <input
+              className="field"
+              type="password"
+              placeholder="Master passphrase"
+              value={passphrase}
+              onChange={e => setPassphrase(e.target.value)}
+              autoFocus
+            />
+            <button className="btn" disabled={busy}>
+              {busy ? 'Unlocking…' : 'Unlock'}
+            </button>
+          </form>
+          {error && <p className="error-text">{error}</p>}
+          <p className="hint-text">
+            First time? <a href="/setup">Create your account →</a>
+          </p>
+        </div>
       </main>
     );
   }
 
   return (
-    <main style={{ maxWidth: 600, margin: '2rem auto', padding: '0 1rem' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1>Vault</h1>
-        <button onClick={handleLockNow}>Lock</button>
+    <main className="vault-shell">
+      <div className="vault-plate">
+        <div className="vault-header">
+          <h1 className="vault-heading" style={{ marginBottom: 0 }}>
+            Vault
+          </h1>
+          <button className="btn-ghost" onClick={handleLockNow}>
+            Lock
+          </button>
+        </div>
+
+        <input type="file" onChange={handleUpload} />
+        <div className="ledger">
+          {status && <span className="ledger-dot" />}
+          {status}
+        </div>
+
+        <div className="count-row">
+          <div>
+            <div className="count-number">{rawFiles.length}</div>
+            <div className="count-label">file{rawFiles.length === 1 ? '' : 's'} stored, encrypted</div>
+          </div>
+          <button className="btn-ghost" onClick={revealed ? () => setRevealed(false) : handleReveal} disabled={rawFiles.length === 0}>
+            {revealed ? 'Hide' : 'Show files'}
+          </button>
+        </div>
+
+        {revealed && (
+          <ul className="file-list">
+            {decryptedFiles.map(f => (
+              <li key={f.id} className="file-row">
+                <div>
+                  <div className="file-name">{f.name}</div>
+                  <div className="file-meta">{f.size.toLocaleString()} bytes</div>
+                </div>
+                <button className="btn-ghost" onClick={() => handleDownload(f.id)}>
+                  Download
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
-      <input type="file" onChange={handleUpload} />
-      <p>{status}</p>
-      <ul style={{ listStyle: 'none', padding: 0 }}>
-        {files.map(f => (
-          <li key={f.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid #eee' }}>
-            <span>{f.name} ({f.size} bytes)</span>
-            <button onClick={() => handleDownload(f.id)}>Download</button>
-          </li>
-        ))}
-      </ul>
     </main>
   );
 }
