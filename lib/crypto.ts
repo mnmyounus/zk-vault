@@ -149,6 +149,14 @@ export async function sha256Hex(file: File): Promise<string> {
 // dropping references promptly is the practical best-effort mitigation
 // available here — not a hard guarantee against a sufficiently capable
 // local attacker with memory-inspection access to the device.
+//
+// Deliberately NOT listening for "pagehide": on several mobile browsers
+// that event also fires when a native file picker or save/download sheet
+// opens on top of the page — not just on a real navigation-away. Wiping
+// on that false signal meant tapping the file input (upload) or Export
+// (save dialog) would lock the vault before you could finish using it.
+// beforeunload (real navigation/close) and the idle timer (walked away)
+// are the actual protections; they don't share this false-positive.
 
 type Listener = () => void;
 
@@ -165,7 +173,6 @@ class KeyStore {
         window.addEventListener(evt, () => this.touch(), { passive: true })
       );
       window.addEventListener('beforeunload', () => this.wipe());
-      window.addEventListener('pagehide', () => this.wipe());
     }
   }
 
